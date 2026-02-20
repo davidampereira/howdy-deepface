@@ -14,8 +14,8 @@ import sys
 import os
 import json
 import configparser
-import dlib
 import cv2
+from deepface import DeepFace
 from datetime import timezone, datetime
 import atexit
 import subprocess
@@ -40,28 +40,17 @@ def exit(code=None):
 
 
 def init_detector(lock):
-	"""Start face detector, encoder and predictor in a new thread"""
-	global face_detector, pose_predictor, face_encoder
+	"""Pre-warm DeepFace models by loading them into memory"""
+	global deepface_model_name, deepface_detector_name
 
-	# Test if at lest 1 of the data files is there and abort if it's not
-	if not os.path.isfile(paths_factory.shape_predictor_5_face_landmarks_path()):
-		print(_("Data files have not been downloaded, please run the following commands:"))
-		print("\n\tcd " + paths_factory.dlib_data_dir_path())
-		print("\tsudo ./install.sh\n")
+	try:
+		DeepFace.build_model(deepface_model_name)
+	except Exception as e:
+		print(_("Error loading DeepFace model: ") + str(e))
 		lock.release()
 		exit(1)
 
-	# Use the CNN detector if enabled
-	if use_cnn:
-		face_detector = dlib.cnn_face_detection_model_v1(paths_factory.mmod_human_face_detector_path())
-	else:
-		face_detector = dlib.get_frontal_face_detector()
-
-	# Start the others regardless
-	pose_predictor = dlib.shape_predictor(paths_factory.shape_predictor_5_face_landmarks_path())
-	face_encoder = dlib.face_recognition_model_v1(paths_factory.dlib_face_recognition_resnet_model_v1_path())
-
-	# Note the time it took to initialize detectors
+	# Note the time it took to initialize the model
 	timings["ll"] = time.time() - timings["ll"]
 	lock.release()
 
@@ -74,7 +63,7 @@ def make_snapshot(type):
 		_("Scan time: ") + str(round(time.time() - timings["fr"], 2)) + "s",
 		_("Frames: ") + str(frames) + " (" + str(round(frames / (time.time() - timings["fr"]), 2)) + "FPS)",
 		_("Hostname: ") + os.uname().nodename,
-		_("Best certainty value: ") + str(round(lowest_certainty * 10, 1))
+		_("Best certainty value: ") + str(round(lowest_certainty, 3))
 	])
 
 
@@ -116,10 +105,9 @@ frames = 0
 snapframes = []
 # Tracks the lowest certainty value in the loop
 lowest_certainty = 10
-# Face recognition/detection instances
-face_detector = None
-pose_predictor = None
-face_encoder = None
+# DeepFace model and detector names
+deepface_model_name = None
+deepface_detector_name = None
 
 # Try to load the face model from the models folder
 try:
@@ -139,15 +127,25 @@ config = configparser.ConfigParser()
 config.read(paths_factory.config_file_path())
 
 # Get all config values needed
-use_cnn = config.getboolean("core", "use_cnn", fallback=False)
+deepface_model_name = config.get("core", "recognition_model", fallback="ArcFace")
+deepface_detector_name = config.get("core", "detector_backend", fallback="retinaface")
+deepface_distance_metric = config.get("core", "distance_metric", fallback="cosine")
 timeout = config.getint("video", "timeout", fallback=4)
 dark_threshold = config.getfloat("video", "dark_threshold", fallback=50.0)
-video_certainty = config.getfloat("video", "certainty", fallback=3.5) / 10
 end_report = config.getboolean("debug", "end_report", fallback=False)
 save_failed = config.getboolean("snapshots", "save_failed", fallback=False)
 save_successful = config.getboolean("snapshots", "save_successful", fallback=False)
 gtk_stdout = config.getboolean("debug", "gtk_stdout", fallback=False)
 rotate = config.getint("video", "rotate", fallback=0)
+
+# Get certainty threshold — "auto" means use DeepFace's built-in threshold
+certainty_raw = config.get("video", "certainty", fallback="auto")
+if certainty_raw.strip().lower() == "auto":
+	# Use DeepFace's built-in threshold for the chosen model + metric
+	from deepface.modules.verification import find_threshold
+	video_certainty = find_threshold(deepface_model_name, deepface_distance_metric)
+else:
+	video_certainty = float(certainty_raw)
 
 # Send the gtk output to the terminal if enabled in the config
 gtk_pipe = sys.stdout if gtk_stdout else subprocess.DEVNULL
@@ -209,6 +207,9 @@ clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
 
 # Let the ui know that we're ready
 send_to_ui("M", _("Identifying you..."))
+
+# Precompute numpy arrays of stored encodings for fast comparison
+encodings_np = np.array(encodings)
 
 # Start the read loop
 frames = 0
@@ -297,24 +298,43 @@ while True:
 			frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
 			gsframe = cv2.rotate(gsframe, cv2.ROTATE_90_CLOCKWISE)
 
-	# Get all faces from that frame as encodings
-	# Upsamples 1 time
-	face_locations = face_detector(gsframe, 1)
-	# Loop through each face
-	for fl in face_locations:
-		if use_cnn:
-			fl = fl.rect
+	# Get face embeddings from the frame using DeepFace
+	try:
+		results = DeepFace.represent(
+			img_path=frame,
+			model_name=deepface_model_name,
+			detector_backend=deepface_detector_name,
+			enforce_detection=False,
+			align=True,
+		)
+	except Exception:
+		# Skip frame on any DeepFace error
+		continue
 
-		# Fetch the faces in the image
-		face_landmark = pose_predictor(frame, fl)
-		face_encoding = np.array(face_encoder.compute_face_descriptor(frame, face_landmark, 1))
+	# Loop through each detected face
+	for result in results:
+		face_encoding = np.array(result["embedding"])
 
-		# Match this found face against a known face
-		matches = np.linalg.norm(encodings - face_encoding, axis=1)
+		# Compute distance between this face and all stored encodings
+		if deepface_distance_metric == "cosine":
+			# Cosine distance = 1 - cosine_similarity
+			face_norm = np.linalg.norm(face_encoding)
+			enc_norms = np.linalg.norm(encodings_np, axis=1)
+			cosine_similarities = np.dot(encodings_np, face_encoding) / (enc_norms * face_norm + 1e-10)
+			distances = 1 - cosine_similarities
+		elif deepface_distance_metric == "euclidean":
+			distances = np.linalg.norm(encodings_np - face_encoding, axis=1)
+		elif deepface_distance_metric == "euclidean_l2":
+			# L2-normalize then compute euclidean distance
+			face_norm_vec = face_encoding / (np.linalg.norm(face_encoding) + 1e-10)
+			enc_norm_vecs = encodings_np / (np.linalg.norm(encodings_np, axis=1, keepdims=True) + 1e-10)
+			distances = np.linalg.norm(enc_norm_vecs - face_norm_vec, axis=1)
+		else:
+			distances = np.linalg.norm(encodings_np - face_encoding, axis=1)
 
 		# Get best match
-		match_index = np.argmin(matches)
-		match = matches[match_index]
+		match_index = np.argmin(distances)
+		match = distances[match_index]
 
 		# Update certainty if we have a new low
 		if lowest_certainty > match:
@@ -351,7 +371,7 @@ while True:
 				print(_("\nFrames searched: %d (%.2f fps)") % (frames, frames / timings["fl"]))
 				print(_("Black frames ignored: %d ") % (black_tries, ))
 				print(_("Dark frames ignored: %d ") % (dark_tries, ))
-				print(_("Certainty of winning frame: %.3f") % (match * 10, ))
+				print(_("Certainty of winning frame: %.3f") % (match, ))
 
 				print(_("Winning model: %d (\"%s\")") % (match_index, models[match_index]["label"]))
 
@@ -370,8 +390,6 @@ while True:
 
 				rubberstamps.execute(config, gtk_proc, {
 					"video_capture": video_capture,
-					"face_detector": face_detector,
-					"pose_predictor": pose_predictor,
 					"clahe": clahe
 				})
 

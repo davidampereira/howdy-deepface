@@ -1,27 +1,8 @@
 from pathlib import PurePath
 import paths
 
-models = [
-    "shape_predictor_5_face_landmarks.dat",
-    "mmod_human_face_detector.dat",
-    "dlib_face_recognition_resnet_model_v1.dat",
-]
-
-
-def dlib_data_dir_path() -> str:
-    return str(paths.dlib_data_dir)
-
-
-def shape_predictor_5_face_landmarks_path() -> str:
-    return str(paths.dlib_data_dir / models[0])
-
-
-def mmod_human_face_detector_path() -> str:
-    return str(paths.dlib_data_dir / models[1])
-
-
-def dlib_face_recognition_resnet_model_v1_path() -> str:
-    return str(paths.dlib_data_dir / models[2])
+# DeepFace manages its own model downloads to ~/.deepface/weights/
+# No manual model path management needed
 
 
 def user_model_path(user: str) -> str:

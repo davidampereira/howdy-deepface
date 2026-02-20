@@ -7,7 +7,7 @@ import os
 import json
 import sys
 import time
-import dlib
+from deepface import DeepFace
 import cv2
 import numpy as np
 import paths_factory
@@ -26,7 +26,18 @@ if config.get("video", "recording_plugin", fallback="opencv") != "opencv":
 video_capture = VideoCapture(config)
 
 # Read config values to use in the main loop
-video_certainty = config.getfloat("video", "certainty", fallback=3.5) / 10
+deepface_model = config.get("core", "recognition_model", fallback="ArcFace")
+deepface_detector = config.get("core", "detector_backend", fallback="retinaface")
+deepface_distance_metric = config.get("core", "distance_metric", fallback="cosine")
+
+# Get certainty threshold
+certainty_raw = config.get("video", "certainty", fallback="auto")
+if certainty_raw.strip().lower() == "auto":
+	from deepface.modules.verification import find_threshold
+	video_certainty = find_threshold(deepface_model, deepface_distance_metric)
+else:
+	video_certainty = float(certainty_raw)
+
 exposure = config.getint("video", "exposure", fallback=-1)
 dark_threshold = config.getfloat("video", "dark_threshold", fallback=60)
 
@@ -53,17 +64,9 @@ def print_text(line_number, text):
 	cv2.putText(overlay, text, (10, height - 10 - (10 * line_number)), cv2.FONT_HERSHEY_SIMPLEX, .3, (0, 255, 0), 0, cv2.LINE_AA)
 
 
-use_cnn = config.getboolean('core', 'use_cnn', fallback=False)
-
-if use_cnn:
-	face_detector = dlib.cnn_face_detection_model_v1(
-		paths_factory.mmod_human_face_detector_path()
-	)
-else:
-	face_detector = dlib.get_frontal_face_detector()
-
-pose_predictor = dlib.shape_predictor(paths_factory.shape_predictor_5_face_landmarks_path())
-face_encoder = dlib.face_recognition_model_v1(paths_factory.dlib_face_recognition_resnet_model_v1_path())
+# Pre-warm the DeepFace model
+print(_("Loading DeepFace model..."))
+DeepFace.build_model(deepface_model)
 
 encodings = []
 models = None
@@ -76,6 +79,9 @@ try:
 		encodings += model["data"]
 except FileNotFoundError:
 	pass
+
+# Precompute numpy array of stored encodings
+encodings_np = np.array(encodings) if encodings else None
 
 clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
 
@@ -164,40 +170,52 @@ try:
 
 			rec_tm = time.time()
 
-			# Get the locations of all faces and their locations
-			# Upsample it once
-			face_locations = face_detector(frame, 1)
+			# Get face embeddings using DeepFace
+			try:
+				results = DeepFace.represent(
+					img_path=orig_frame,
+					model_name=deepface_model,
+					detector_backend=deepface_detector,
+					enforce_detection=False,
+					align=True,
+				)
+			except Exception:
+				results = []
+
 			rec_tm = time.time() - rec_tm
 
 			# Loop though all faces and paint a circle around them
-			for loc in face_locations:
-				if use_cnn:
-					loc = loc.rect
-
+			for result in results:
 				# By default the circle around the face is red for no match
 				color = (0, 0, 230)
 
-				# Get the center X and Y from the rectangular points
-				x = int((loc.right() - loc.left()) / 2) + loc.left()
-				y = int((loc.bottom() - loc.top()) / 2) + loc.top()
-
-				# Get the raduis from the with of the square
-				r = (loc.right() - loc.left()) / 2
-				# Add 20% padding
-				r = int(r + (r * 0.2))
+				# Get the bounding box from DeepFace
+				fa = result["facial_area"]
+				# Calculate center and radius from the bounding box
+				x = fa["x"] + fa["w"] // 2
+				y = fa["y"] + fa["h"] // 2
+				r = int(max(fa["w"], fa["h"]) / 2 * 1.2)  # 20% padding
 
 				# If we have models defined for the current user
-				if models:
-					# Get the encoding of the face in the frame
-					face_landmark = pose_predictor(orig_frame, loc)
-					face_encoding = np.array(face_encoder.compute_face_descriptor(orig_frame, face_landmark, 1))
+				if models and encodings_np is not None:
+					face_encoding = np.array(result["embedding"])
 
-					# Match this found face against a known face
-					matches = np.linalg.norm(encodings - face_encoding, axis=1)
+					# Compute distances based on configured metric
+					if deepface_distance_metric == "cosine":
+						face_norm = np.linalg.norm(face_encoding)
+						enc_norms = np.linalg.norm(encodings_np, axis=1)
+						cosine_similarities = np.dot(encodings_np, face_encoding) / (enc_norms * face_norm + 1e-10)
+						distances = 1 - cosine_similarities
+					elif deepface_distance_metric == "euclidean_l2":
+						face_norm_vec = face_encoding / (np.linalg.norm(face_encoding) + 1e-10)
+						enc_norm_vecs = encodings_np / (np.linalg.norm(encodings_np, axis=1, keepdims=True) + 1e-10)
+						distances = np.linalg.norm(enc_norm_vecs - face_norm_vec, axis=1)
+					else:
+						distances = np.linalg.norm(encodings_np - face_encoding, axis=1)
 
 					# Get best match
-					match_index = np.argmin(matches)
-					match = matches[match_index]
+					match_index = np.argmin(distances)
+					match = distances[match_index]
 
 					# If a model matches
 					if 0 < match < video_certainty:
@@ -205,7 +223,7 @@ try:
 						color = (0, 230, 0)
 
 						# Print the name of the model next to the circle
-						circle_text = "{} (certainty: {})".format(models[match_index]["label"], round(match * 10, 3))
+						circle_text = "{} (dist: {})".format(models[match_index]["label"], round(match, 3))
 						cv2.putText(overlay, circle_text, (int(x + r / 3), y - r), cv2.FONT_HERSHEY_SIMPLEX, .3, (0, 255, 0), 0, cv2.LINE_AA)
 					# If no approved matches, show red text
 					else:

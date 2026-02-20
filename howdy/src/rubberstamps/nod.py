@@ -1,9 +1,14 @@
 import time
+import cv2
 
 from i18n import _
 
 # Import the root rubberstamp class
 from rubberstamps import RubberStamp
+
+# Import MediaPipe for facial landmark detection
+import mediapipe as mp
+mp_face_mesh = mp.solutions.face_mesh
 
 
 class nod(RubberStamp):
@@ -13,7 +18,7 @@ class nod(RubberStamp):
 		self.options["min_directions"] = 2
 
 	def run(self):
-		"""Track a users nose to see if they nod yes or no"""
+		"""Track a users nose to see if they nod yes or no using MediaPipe"""
 		self.set_ui_text(_("Nod to confirm"), self.UI_TEXT)
 		self.set_ui_text(_("Shake your head to abort"), self.UI_SUBTEXT)
 
@@ -27,72 +32,94 @@ class nod(RubberStamp):
 
 		starttime = time.time()
 
-		# Keep running the loop while we have not hit timeout yet
-		while time.time() < starttime + self.options["timeout"]:
-			# Read a frame from the camera
-			ret, frame = self.video_capture.read_frame()
+		# Use MediaPipe Face Mesh for landmark detection
+		with mp_face_mesh.FaceMesh(
+			max_num_faces=1,
+			min_detection_confidence=0.5,
+			min_tracking_confidence=0.5
+		) as face_mesh:
+			# Keep running the loop while we have not hit timeout yet
+			while time.time() < starttime + self.options["timeout"]:
+				# Read a frame from the camera
+				ret, frame = self.video_capture.read_frame()
 
-			# Apply CLAHE to get a better picture
-			frame = self.clahe.apply(frame)
+				# Apply CLAHE to get a better picture
+				frame = self.clahe.apply(frame)
 
-			# Detect all faces in the frame
-			face_locations = self.face_detector(frame, 1)
+				# MediaPipe requires RGB input
+				frame_rgb = cv2.cvtColor(frame, cv2.COLOR_GRAY2RGB)
+				results = face_mesh.process(frame_rgb)
 
-			# Only continue if exactly 1 face is visible in the frame
-			if len(face_locations) != 1:
-				continue
+				# Only continue if exactly 1 face is visible in the frame
+				if not results.multi_face_landmarks or len(results.multi_face_landmarks) != 1:
+					continue
 
-			# Get the position of the eyes and tip of the nose
-			face_landmarks = self.pose_predictor(frame, face_locations[0])
+				# Get facial landmarks
+				landmarks = results.multi_face_landmarks[0]
+				h, w = frame.shape[:2]
 
-			# Calculate the relative distance between the 2 eyes
-			reldist = face_landmarks.part(0).x - face_landmarks.part(2).x
-			# Average this out with the distance found in the last frame to smooth it out
-			avg_reldist = (last_reldist + reldist) / 2
+				# MediaPipe landmark indices:
+				#   Left eye outer corner:  33
+				#   Right eye outer corner: 263
+				#   Nose tip:               1
+				left_eye = landmarks.landmark[33]
+				right_eye = landmarks.landmark[263]
+				nose_tip = landmarks.landmark[1]
 
-			# Calculate horizontal movement (shaking head) and vertical movement (nodding)
-			for axis in ["x", "y"]:
-				# Get the location of the nose on the active axis
-				nosepoint = getattr(face_landmarks.part(4), axis)
+				# Convert normalized coordinates to pixel coordinates
+				left_eye_x = int(left_eye.x * w)
+				right_eye_x = int(right_eye.x * w)
+				nose_x = int(nose_tip.x * w)
+				nose_y = int(nose_tip.y * h)
 
-				# If this is the first frame set the previous values to the current ones
-				if last_nosepoint[axis] == -1:
-					last_nosepoint[axis] = nosepoint
+				# Calculate the relative distance between the 2 eyes
+				reldist = left_eye_x - right_eye_x
+				# Average this out with the distance found in the last frame to smooth it out
+				avg_reldist = (last_reldist + reldist) / 2
+
+				# Calculate horizontal movement (shaking head) and vertical movement (nodding)
+				for axis in ["x", "y"]:
+					# Get the location of the nose on the active axis
+					nosepoint = nose_x if axis == "x" else nose_y
+
+					# If this is the first frame set the previous values to the current ones
+					if last_nosepoint[axis] == -1:
+						last_nosepoint[axis] = nosepoint
+						last_reldist = reldist
+
+					mindist = self.options["min_distance"]
+					# Get the relative movement by taking the distance traveled and dividing it by eye distance
+					movement = (nosepoint - last_nosepoint[axis]) * 100 / max(avg_reldist, 1)
+
+					# If the movement is over the minimal distance threshold
+					if movement < -mindist or movement > mindist:
+						# If this is the first recorded nod, add it to the array
+						if len(recorded_nods[axis]) == 0:
+							recorded_nods[axis].append(movement < 0)
+
+						# Otherwise, only add this nod if the previous nod with in the other direction
+						elif recorded_nods[axis][-1] != (movement < 0):
+							recorded_nods[axis].append(movement < 0)
+
+					# Check if we have nodded enough on this axis
+					if len(recorded_nods[axis]) >= self.options["min_directions"]:
+						# If nodded yes, show confirmation in ui
+						if (axis == "y"):
+							self.set_ui_text(_("Confirmed authentication"), self.UI_TEXT)
+						# If shaken no, show abort message
+						else:
+							self.set_ui_text(_("Aborted authentication"), self.UI_TEXT)
+
+						# Remove subtext
+						self.set_ui_text("", self.UI_SUBTEXT)
+
+						# Return true for nodding yes and false for shaking no
+						time.sleep(0.8)
+						return axis == "y"
+
+					# Save the relative distance and the nosepoint for next loop
 					last_reldist = reldist
-
-				mindist = self.options["min_distance"]
-				# Get the relative movement by taking the distance traveled and dividing it by eye distance
-				movement = (nosepoint - last_nosepoint[axis]) * 100 / max(avg_reldist, 1)
-
-				# If the movement is over the minimal distance threshold
-				if movement < -mindist or movement > mindist:
-					# If this is the first recorded nod, add it to the array
-					if len(recorded_nods[axis]) == 0:
-						recorded_nods[axis].append(movement < 0)
-
-					# Otherwise, only add this nod if the previous nod with in the other direction
-					elif recorded_nods[axis][-1] != (movement < 0):
-						recorded_nods[axis].append(movement < 0)
-
-				# Check if we have nodded enough on this axis
-				if len(recorded_nods[axis]) >= self.options["min_directions"]:
-					# If nodded yes, show confirmation in ui
-					if (axis == "y"):
-						self.set_ui_text(_("Confirmed authentication"), self.UI_TEXT)
-					# If shaken no, show abort message
-					else:
-						self.set_ui_text(_("Aborted authentication"), self.UI_TEXT)
-
-					# Remove subtext
-					self.set_ui_text("", self.UI_SUBTEXT)
-
-					# Return true for nodding yes and false for shaking no
-					time.sleep(0.8)
-					return axis == "y"
-
-				# Save the relative distance and the nosepoint for next loop
-				last_reldist = reldist
-				last_nosepoint[axis] = nosepoint
+					last_nosepoint[axis] = nosepoint
 
 		# We've fallen out of the loop, so timeout has been hit
 		return not self.options["failsafe"]

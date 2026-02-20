@@ -13,39 +13,25 @@ import paths_factory
 from recorders.video_capture import VideoCapture
 from i18n import _
 
-# Try to import dlib and give a nice error if we can't
+# Try to import deepface and give a nice error if we can't
 # Add should be the first point where import issues show up
 try:
-	import dlib
+	from deepface import DeepFace
 except ImportError as err:
 	print(err)
 
-	print(_("\nCan't import the dlib module, check the output of"))
-	print("pip3 show dlib")
+	print(_("\nCan't import the deepface module, check the output of"))
+	print("pip3 show deepface")
 	sys.exit(1)
 
-# OpenCV needs to be imported after dlib
 import cv2
-
-# Test if at lest 1 of the data files is there and abort if it's not
-if not os.path.isfile(paths_factory.shape_predictor_5_face_landmarks_path()):
-	print(_("Data files have not been downloaded, please run the following commands:"))
-	print("\n\tcd " + paths_factory.dlib_data_dir_path())
-	print("\tsudo ./install.sh\n")
-	sys.exit(1)
 
 # Read config from disk
 config = configparser.ConfigParser()
 config.read(paths_factory.config_file_path())
 
-use_cnn = config.getboolean("core", "use_cnn", fallback=False)
-if use_cnn:
-	face_detector = dlib.cnn_face_detection_model_v1(paths_factory.mmod_human_face_detector_path())
-else:
-	face_detector = dlib.get_frontal_face_detector()
-
-pose_predictor = dlib.shape_predictor(paths_factory.shape_predictor_5_face_landmarks_path())
-face_encoder = dlib.face_recognition_model_v1(paths_factory.dlib_face_recognition_resnet_model_v1_path())
+deepface_model = config.get("core", "recognition_model", fallback="ArcFace")
+deepface_detector = config.get("core", "detector_backend", fallback="retinaface")
 
 user = builtins.howdy_user
 # The permanent file to store the encoded model in
@@ -167,17 +153,26 @@ while frames < 60:
 		dark_tries += 1
 		continue
 
-	# Get all faces from that frame as encodings
-	face_locations = face_detector(gsframe, 1)
+	# Get all faces from that frame as encodings using DeepFace
+	try:
+		results = DeepFace.represent(
+			img_path=frame,
+			model_name=deepface_model,
+			detector_backend=deepface_detector,
+			enforce_detection=False,
+			align=True,
+		)
+	except Exception:
+		results = []
 
 	# If we've found at least one, we can continue
-	if face_locations:
+	if results:
 		break
 
 video_capture.release()
 
 # If we've found no faces, try to determine why
-if not face_locations:
+if not results:
 	if valid_frames == 0:
 		print(_("Camera saw only black frames - is IR emitter working?"))
 	elif valid_frames == dark_tries:
@@ -188,19 +183,14 @@ if not face_locations:
 	sys.exit(1)
 
 # If more than 1 faces are detected we can't know which one belongs to the user
-elif len(face_locations) > 1:
+elif len(results) > 1:
 	print(_("Multiple faces detected, aborting"))
 	sys.exit(1)
 
-face_location = face_locations[0]
-if use_cnn:
-	face_location = face_location.rect
+# Get the embedding from DeepFace result
+face_encoding = results[0]["embedding"]
 
-# Get the encodings in the frame
-face_landmark = pose_predictor(frame, face_location)
-face_encoding = np.array(face_encoder.compute_face_descriptor(frame, face_landmark, 1))
-
-insert_model["data"].append(face_encoding.tolist())
+insert_model["data"].append(face_encoding)
 
 # Insert full object into the list
 encodings.append(insert_model)
