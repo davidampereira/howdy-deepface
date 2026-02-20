@@ -107,9 +107,11 @@ python3-dev libopencv-dev
 #### Build
 
 ```sh
-meson setup build
+meson setup build -Dpython_path=/usr/bin/python3.12
 meson compile -C build
 ```
+
+If your DeepFace/TensorFlow stack lives in a virtual environment, point Howdy to that interpreter instead (for example `-Dpython_path=/path/to/tf-env/bin/python3.12`).
 
 You can also install Howdy to your system with `meson install -C build`.
 
