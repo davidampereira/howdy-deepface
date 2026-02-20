@@ -116,7 +116,7 @@ valid_frames = 0
 dark_tries = 0
 # Track the running darkness total
 dark_running_total = 0
-face_locations = None
+results = []
 
 dark_threshold = config.getfloat("video", "dark_threshold", fallback=60)
 

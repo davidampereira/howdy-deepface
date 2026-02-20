@@ -85,6 +85,22 @@ def send_to_ui(type, message):
 			pass
 
 
+def resolve_video_certainty(config, model_name, distance_metric):
+	"""Resolve certainty setting with legacy migration support."""
+	certainty_raw = config.get("video", "certainty", fallback="auto").strip()
+
+	if certainty_raw.lower() == "auto":
+		from deepface.modules.verification import find_threshold
+		return find_threshold(model_name, distance_metric)
+
+	certainty_value = float(certainty_raw)
+	if certainty_value > 1 and distance_metric in ("cosine", "euclidean_l2"):
+		print(_("Detected legacy certainty scale (1-10); converting to distance scale."))
+		certainty_value /= 10
+
+	return certainty_value
+
+
 # Make sure we were given an username to test against
 if len(sys.argv) < 2:
 	exit(12)
@@ -138,14 +154,8 @@ save_successful = config.getboolean("snapshots", "save_successful", fallback=Fal
 gtk_stdout = config.getboolean("debug", "gtk_stdout", fallback=False)
 rotate = config.getint("video", "rotate", fallback=0)
 
-# Get certainty threshold — "auto" means use DeepFace's built-in threshold
-certainty_raw = config.get("video", "certainty", fallback="auto")
-if certainty_raw.strip().lower() == "auto":
-	# Use DeepFace's built-in threshold for the chosen model + metric
-	from deepface.modules.verification import find_threshold
-	video_certainty = find_threshold(deepface_model_name, deepface_distance_metric)
-else:
-	video_certainty = float(certainty_raw)
+# Get certainty threshold
+video_certainty = resolve_video_certainty(config, deepface_model_name, deepface_distance_metric)
 
 # Send the gtk output to the terminal if enabled in the config
 gtk_pipe = sys.stdout if gtk_stdout else subprocess.DEVNULL
@@ -209,7 +219,19 @@ clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
 send_to_ui("M", _("Identifying you..."))
 
 # Precompute numpy arrays of stored encodings for fast comparison
-encodings_np = np.array(encodings)
+try:
+	encodings_np = np.array(encodings, dtype=np.float32)
+except (ValueError, TypeError):
+	print(_("Stored face models are not compatible with the selected recognition backend."))
+	print(_("Please re-enroll your face model with: sudo howdy clear && sudo howdy add"))
+	exit(10)
+
+if encodings_np.ndim != 2 or encodings_np.shape[0] < 1:
+	print(_("Stored face models are not compatible with the selected recognition backend."))
+	print(_("Please re-enroll your face model with: sudo howdy clear && sudo howdy add"))
+	exit(10)
+
+expected_embedding_dim = encodings_np.shape[1]
 
 # Start the read loop
 frames = 0
@@ -313,7 +335,12 @@ while True:
 
 	# Loop through each detected face
 	for result in results:
-		face_encoding = np.array(result["embedding"])
+		face_encoding = np.array(result["embedding"], dtype=np.float32)
+
+		if face_encoding.ndim != 1 or face_encoding.shape[0] != expected_embedding_dim:
+			print(_("Stored face models are incompatible with the current DeepFace model."))
+			print(_("Please re-enroll your face model with: sudo howdy clear && sudo howdy add"))
+			exit(10)
 
 		# Compute distance between this face and all stored encodings
 		if deepface_distance_metric == "cosine":

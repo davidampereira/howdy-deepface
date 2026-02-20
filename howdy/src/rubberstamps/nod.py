@@ -73,7 +73,7 @@ class nod(RubberStamp):
 				nose_y = int(nose_tip.y * h)
 
 				# Calculate the relative distance between the 2 eyes
-				reldist = left_eye_x - right_eye_x
+				reldist = abs(left_eye_x - right_eye_x)
 				# Average this out with the distance found in the last frame to smooth it out
 				avg_reldist = (last_reldist + reldist) / 2
 

@@ -15,6 +15,22 @@ import paths_factory
 from i18n import _
 from recorders.video_capture import VideoCapture
 
+
+def resolve_video_certainty(config, model_name, distance_metric):
+	"""Resolve certainty setting with legacy migration support."""
+	certainty_raw = config.get("video", "certainty", fallback="auto").strip()
+
+	if certainty_raw.lower() == "auto":
+		from deepface.modules.verification import find_threshold
+		return find_threshold(model_name, distance_metric)
+
+	certainty_value = float(certainty_raw)
+	if certainty_value > 1 and distance_metric in ("cosine", "euclidean_l2"):
+		print(_("Detected legacy certainty scale (1-10); converting to distance scale."))
+		certainty_value /= 10
+
+	return certainty_value
+
 # Read config from disk
 config = configparser.ConfigParser()
 config.read(paths_factory.config_file_path())
@@ -31,12 +47,7 @@ deepface_detector = config.get("core", "detector_backend", fallback="retinaface"
 deepface_distance_metric = config.get("core", "distance_metric", fallback="cosine")
 
 # Get certainty threshold
-certainty_raw = config.get("video", "certainty", fallback="auto")
-if certainty_raw.strip().lower() == "auto":
-	from deepface.modules.verification import find_threshold
-	video_certainty = find_threshold(deepface_model, deepface_distance_metric)
-else:
-	video_certainty = float(certainty_raw)
+video_certainty = resolve_video_certainty(config, deepface_model, deepface_distance_metric)
 
 exposure = config.getint("video", "exposure", fallback=-1)
 dark_threshold = config.getfloat("video", "dark_threshold", fallback=60)
@@ -81,7 +92,23 @@ except FileNotFoundError:
 	pass
 
 # Precompute numpy array of stored encodings
-encodings_np = np.array(encodings) if encodings else None
+encodings_np = None
+expected_embedding_dim = None
+if encodings:
+	try:
+		encodings_np = np.array(encodings, dtype=np.float32)
+		if encodings_np.ndim == 2 and encodings_np.shape[0] > 0:
+			expected_embedding_dim = encodings_np.shape[1]
+		else:
+			encodings_np = None
+	except (ValueError, TypeError):
+		encodings_np = None
+
+if encodings and encodings_np is None:
+	print(_("Stored face models are not compatible with the selected recognition backend."))
+	print(_("Please re-enroll your face model with: sudo howdy clear && sudo howdy add"))
+
+warned_incompatible_dimensions = False
 
 clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
 
@@ -198,7 +225,14 @@ try:
 
 				# If we have models defined for the current user
 				if models and encodings_np is not None:
-					face_encoding = np.array(result["embedding"])
+					face_encoding = np.array(result["embedding"], dtype=np.float32)
+
+					if face_encoding.ndim != 1 or (expected_embedding_dim is not None and face_encoding.shape[0] != expected_embedding_dim):
+						if not warned_incompatible_dimensions:
+							print(_("Stored face models are incompatible with the current DeepFace model."))
+							print(_("Please re-enroll your face model with: sudo howdy clear && sudo howdy add"))
+							warned_incompatible_dimensions = True
+						continue
 
 					# Compute distances based on configured metric
 					if deepface_distance_metric == "cosine":
