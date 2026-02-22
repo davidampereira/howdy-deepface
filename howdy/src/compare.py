@@ -16,7 +16,6 @@ os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 import json
 import configparser
 import cv2
-from deepface import DeepFace
 from datetime import timezone, datetime
 import atexit
 import subprocess
@@ -43,9 +42,12 @@ def exit(code=None):
 
 def init_detector(lock):
     """Pre-warm DeepFace models by loading them into memory"""
-    global deepface_model_name, deepface_detector_name
+    global DeepFace, deepface_model_name, deepface_detector_name
 
     try:
+        from deepface import DeepFace as DeepFaceModule
+
+        DeepFace = DeepFaceModule
         DeepFace.build_model(deepface_model_name)
     except Exception as e:
         print(_("Error loading DeepFace model: ") + str(e))
@@ -138,6 +140,7 @@ lowest_certainty = 10
 # DeepFace model and detector names
 deepface_model_name = None
 deepface_detector_name = None
+DeepFace = None
 
 # Try to load the face model from the models folder
 try:
@@ -167,11 +170,6 @@ save_failed = config.getboolean("snapshots", "save_failed", fallback=False)
 save_successful = config.getboolean("snapshots", "save_successful", fallback=False)
 gtk_stdout = config.getboolean("debug", "gtk_stdout", fallback=False)
 rotate = config.getint("video", "rotate", fallback=0)
-
-# Get certainty threshold
-video_certainty = resolve_video_certainty(
-    config, deepface_model_name, deepface_distance_metric
-)
 
 # Send the gtk output to the terminal if enabled in the config
 gtk_pipe = sys.stdout if gtk_stdout else subprocess.DEVNULL
@@ -217,6 +215,10 @@ timings["ic"] = time.time() - timings["ic"]
 lock.acquire()
 lock.release()
 del lock
+
+video_certainty = resolve_video_certainty(
+    config, deepface_model_name, deepface_distance_metric
+)
 
 # Fetch the max frame height
 max_height = config.getfloat("video", "max_height", fallback=320.0)
