@@ -129,7 +129,6 @@ while frames < 60:
     frames += 1
     # Grab a single frame of video
     frame, gsframe = video_capture.read_frame()
-    gsframe = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     gsframe = clahe.apply(gsframe)
 
     # Create a histogram of the image with 8 values
@@ -164,7 +163,8 @@ while frames < 60:
             enforce_detection=True,
             align=True,
         )
-    except Exception:
+    except (ValueError, RuntimeError) as e:
+        print(_("DeepFace error: ") + str(e), file=sys.stderr)
         results = []
 
     # If we've found at least one, we can continue
@@ -196,6 +196,11 @@ elif len(results) > 1:
 
 # Get the embedding from DeepFace result
 face_encoding = results[0]["embedding"]
+
+# Validate embedding before saving
+if not face_encoding or not isinstance(face_encoding, list) or len(face_encoding) == 0:
+    print(_("Failed to extract a valid face embedding, aborting"))
+    sys.exit(1)
 
 insert_model["data"].append(face_encoding)
 

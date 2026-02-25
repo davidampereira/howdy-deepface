@@ -40,13 +40,13 @@ class nod(RubberStamp):
             # Keep running the loop while we have not hit timeout yet
             while time.time() < starttime + self.options["timeout"]:
                 # Read a frame from the camera
-                ret, frame = self.video_capture.read_frame()
+                color_frame, gsframe = self.video_capture.read_frame()
 
-                # Apply CLAHE to get a better picture
-                frame = self.clahe.apply(frame)
+                # Apply CLAHE to the grayscale frame (kept for consistency)
+                gsframe = self.clahe.apply(gsframe)
 
-                # MediaPipe requires RGB input
-                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_GRAY2RGB)
+                # MediaPipe requires RGB input — use color frame for best results
+                frame_rgb = cv2.cvtColor(color_frame, cv2.COLOR_BGR2RGB)
                 results = face_mesh.process(frame_rgb)
 
                 # Only continue if exactly 1 face is visible in the frame
@@ -58,7 +58,7 @@ class nod(RubberStamp):
 
                 # Get facial landmarks
                 landmarks = results.multi_face_landmarks[0]
-                h, w = frame.shape[:2]
+                h, w = color_frame.shape[:2]
 
                 # MediaPipe landmark indices:
                 #   Left eye outer corner:  33

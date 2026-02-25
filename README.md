@@ -22,11 +22,11 @@ Howdy provides Windows Hello™ style authentication for Linux. Use your built-i
 
 Using the central authentication system (PAM), this works everywhere you would otherwise need your password: Login, lock screen, sudo, su, etc.
 
+Everything I've done here was made by AI
+
 ## Installation
 
 Howdy is currently available and packaged for Debian/Ubuntu, Arch Linux, Fedora and openSUSE. If you’re interested in packaging Howdy for your distro, don’t hesitate to open an issue.
-
-**Note:** The build of dlib can hang on 100% for over a minute, give it time.
 
 ### Ubuntu or Linux Mint
 

@@ -22,8 +22,10 @@ import subprocess
 import snapshot
 import numpy as np
 import _thread as thread
+import traceback
 import paths_factory
 from recorders.video_capture import VideoCapture
+from deepface_utils import resolve_video_certainty, compute_distances, encoding_to_model_index
 from i18n import _
 
 
@@ -98,25 +100,6 @@ def send_to_ui(type, message):
             pass
 
 
-def resolve_video_certainty(config, model_name, distance_metric):
-    """Resolve certainty setting using DeepFace-native thresholds."""
-    certainty_raw = config.get("video", "certainty", fallback="auto").strip()
-
-    if certainty_raw.lower() == "auto":
-        from deepface.modules.verification import find_threshold
-
-        return find_threshold(model_name, distance_metric)
-
-    certainty_value = float(certainty_raw)
-    if certainty_value <= 0:
-        raise ValueError("certainty must be greater than 0")
-
-    if distance_metric in ("cosine", "euclidean_l2") and certainty_value >= 1:
-        raise ValueError(
-            "certainty must be lower than 1 for cosine/euclidean_l2 metrics"
-        )
-
-    return certainty_value
 
 
 # Make sure we were given an username to test against
@@ -138,7 +121,7 @@ frames = 0
 # Captured frames for snapshot capture
 snapframes = []
 # Tracks the lowest certainty value in the loop
-lowest_certainty = 10
+lowest_certainty = float('inf')
 # DeepFace model and detector names
 deepface_model_name = None
 deepface_detector_name = None
@@ -240,10 +223,7 @@ if rotate == 2:
 # Calculate the amount the image has to shrink
 scaling_factor = (max_height / height) or 1
 
-# Fetch config settings out of the loop
-timeout = config.getint("video", "timeout", fallback=4)
-dark_threshold = config.getfloat("video", "dark_threshold", fallback=60)
-end_report = config.getboolean("debug", "end_report", fallback=False)
+
 
 # Initiate histogram equalization
 clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
@@ -391,8 +371,10 @@ while True:
             enforce_detection=True,
             align=True,
         )
-    except Exception:
-        # Skip frame on any DeepFace error
+    except (ValueError, RuntimeError) as e:
+        # Skip frame on face detection/model errors
+        if end_report:
+            traceback.print_exc()
         continue
 
     # Loop through each detected face
@@ -413,25 +395,7 @@ while True:
             exit(10)
 
         # Compute distance between this face and all stored encodings
-        if deepface_distance_metric == "cosine":
-            # Cosine distance = 1 - cosine_similarity
-            face_norm = np.linalg.norm(face_encoding)
-            enc_norms = np.linalg.norm(encodings_np, axis=1)
-            cosine_similarities = np.dot(encodings_np, face_encoding) / (
-                enc_norms * face_norm + 1e-10
-            )
-            distances = 1 - cosine_similarities
-        elif deepface_distance_metric == "euclidean":
-            distances = np.linalg.norm(encodings_np - face_encoding, axis=1)
-        elif deepface_distance_metric == "euclidean_l2":
-            # L2-normalize then compute euclidean distance
-            face_norm_vec = face_encoding / (np.linalg.norm(face_encoding) + 1e-10)
-            enc_norm_vecs = encodings_np / (
-                np.linalg.norm(encodings_np, axis=1, keepdims=True) + 1e-10
-            )
-            distances = np.linalg.norm(enc_norm_vecs - face_norm_vec, axis=1)
-        else:
-            distances = np.linalg.norm(encodings_np - face_encoding, axis=1)
+        distances = compute_distances(face_encoding, encodings_np, deepface_distance_metric)
 
         # Get best match
         match_index = np.argmin(distances)
@@ -485,9 +449,10 @@ while True:
                 print(_("Dark frames ignored: %d ") % (dark_tries,))
                 print(_("Certainty of winning frame: %.3f") % (match,))
 
+                winning_model_idx, winning_label = encoding_to_model_index(match_index, models)
                 print(
                     _('Winning model: %d ("%s")')
-                    % (match_index, models[match_index]["label"])
+                    % (winning_model_idx, winning_label)
                 )
 
             # Make snapshot if enabled

@@ -17,27 +17,9 @@ import paths_factory
 
 from i18n import _
 from recorders.video_capture import VideoCapture
+from deepface_utils import resolve_video_certainty, compute_distances, encoding_to_model_index
 
 
-def resolve_video_certainty(config, model_name, distance_metric):
-    """Resolve certainty setting using DeepFace-native thresholds."""
-    certainty_raw = config.get("video", "certainty", fallback="auto").strip()
-
-    if certainty_raw.lower() == "auto":
-        from deepface.modules.verification import find_threshold
-
-        return find_threshold(model_name, distance_metric)
-
-    certainty_value = float(certainty_raw)
-    if certainty_value <= 0:
-        raise ValueError("certainty must be greater than 0")
-
-    if distance_metric in ("cosine", "euclidean_l2") and certainty_value >= 1:
-        raise ValueError(
-            "certainty must be lower than 1 for cosine/euclidean_l2 metrics"
-        )
-
-    return certainty_value
 
 
 # Read config from disk
@@ -272,7 +254,7 @@ try:
                     enforce_detection=False,
                     align=True,
                 )
-            except Exception:
+            except (ValueError, RuntimeError):
                 results = []
 
             rec_tm = time.time() - rec_tm
@@ -310,25 +292,7 @@ try:
                         sys.exit(10)
 
                     # Compute distances based on configured metric
-                    if deepface_distance_metric == "cosine":
-                        face_norm = np.linalg.norm(face_encoding)
-                        enc_norms = np.linalg.norm(encodings_np, axis=1)
-                        cosine_similarities = np.dot(encodings_np, face_encoding) / (
-                            enc_norms * face_norm + 1e-10
-                        )
-                        distances = 1 - cosine_similarities
-                    elif deepface_distance_metric == "euclidean_l2":
-                        face_norm_vec = face_encoding / (
-                            np.linalg.norm(face_encoding) + 1e-10
-                        )
-                        enc_norm_vecs = encodings_np / (
-                            np.linalg.norm(encodings_np, axis=1, keepdims=True) + 1e-10
-                        )
-                        distances = np.linalg.norm(
-                            enc_norm_vecs - face_norm_vec, axis=1
-                        )
-                    else:
-                        distances = np.linalg.norm(encodings_np - face_encoding, axis=1)
+                    distances = compute_distances(face_encoding, encodings_np, deepface_distance_metric)
 
                     # Get best match
                     match_index = np.argmin(distances)
@@ -340,8 +304,9 @@ try:
                         color = (0, 230, 0)
 
                         # Print the name of the model next to the circle
+                        winning_model_idx, winning_label = encoding_to_model_index(match_index, models)
                         circle_text = "{} (dist: {})".format(
-                            models[match_index]["label"], round(match, 3)
+                            winning_label, round(match, 3)
                         )
                         cv2.putText(
                             overlay,
@@ -402,4 +367,5 @@ except KeyboardInterrupt:
     print(_("\nClosing window"))
 
     # Release handle to the webcam
+    video_capture.release()
     cv2.destroyAllWindows()
