@@ -25,8 +25,3 @@ def onboarding_wireframe_path() -> str:
 def main_window_wireframe_path() -> str:
     """Return the path to the main window wireframe file"""
     return str(paths.data_dir / "main.glade")
-
-
-def dlib_data_dir_path() -> PurePath:
-    """Return the path to the dlib data directory"""
-    return paths.dlib_data_dir

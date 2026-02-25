@@ -20,7 +20,7 @@ from recorders.video_capture import VideoCapture
 
 
 def resolve_video_certainty(config, model_name, distance_metric):
-    """Resolve certainty setting with legacy migration support."""
+    """Resolve certainty setting using DeepFace-native thresholds."""
     certainty_raw = config.get("video", "certainty", fallback="auto").strip()
 
     if certainty_raw.lower() == "auto":
@@ -29,11 +29,13 @@ def resolve_video_certainty(config, model_name, distance_metric):
         return find_threshold(model_name, distance_metric)
 
     certainty_value = float(certainty_raw)
-    if certainty_value > 1 and distance_metric in ("cosine", "euclidean_l2"):
-        print(
-            _("Detected legacy certainty scale (1-10); converting to distance scale.")
+    if certainty_value <= 0:
+        raise ValueError("certainty must be greater than 0")
+
+    if distance_metric in ("cosine", "euclidean_l2") and certainty_value >= 1:
+        raise ValueError(
+            "certainty must be lower than 1 for cosine/euclidean_l2 metrics"
         )
-        certainty_value /= 10
 
     return certainty_value
 
@@ -58,9 +60,17 @@ deepface_detector = config.get("core", "detector_backend", fallback="retinaface"
 deepface_distance_metric = config.get("core", "distance_metric", fallback="cosine")
 
 # Get certainty threshold
-video_certainty = resolve_video_certainty(
-    config, deepface_model, deepface_distance_metric
-)
+try:
+    video_certainty = resolve_video_certainty(
+        config, deepface_model, deepface_distance_metric
+    )
+except ValueError:
+    print(
+        _(
+            "Invalid certainty value in config. Use 'auto' or a valid DeepFace distance threshold."
+        )
+    )
+    sys.exit(1)
 
 exposure = config.getint("video", "exposure", fallback=-1)
 dark_threshold = config.getfloat("video", "dark_threshold", fallback=60)
@@ -137,8 +147,7 @@ if encodings and encodings_np is None:
     print(
         _("Please re-enroll your face model with: sudo howdy clear && sudo howdy add")
     )
-
-warned_incompatible_dimensions = False
+    sys.exit(10)
 
 clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
 
@@ -288,19 +297,17 @@ try:
                         expected_embedding_dim is not None
                         and face_encoding.shape[0] != expected_embedding_dim
                     ):
-                        if not warned_incompatible_dimensions:
-                            print(
-                                _(
-                                    "Stored face models are incompatible with the current DeepFace model."
-                                )
+                        print(
+                            _(
+                                "Stored face models are incompatible with the current DeepFace model."
                             )
-                            print(
-                                _(
-                                    "Please re-enroll your face model with: sudo howdy clear && sudo howdy add"
-                                )
+                        )
+                        print(
+                            _(
+                                "Please re-enroll your face model with: sudo howdy clear && sudo howdy add"
                             )
-                            warned_incompatible_dimensions = True
-                        continue
+                        )
+                        sys.exit(10)
 
                     # Compute distances based on configured metric
                     if deepface_distance_metric == "cosine":

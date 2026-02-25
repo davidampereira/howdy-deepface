@@ -161,7 +161,7 @@ while frames < 60:
             img_path=frame,
             model_name=deepface_model,
             detector_backend=deepface_detector,
-            enforce_detection=False,
+            enforce_detection=True,
             align=True,
         )
     except Exception:
