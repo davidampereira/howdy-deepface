@@ -4,20 +4,19 @@
 import configparser
 import builtins
 import os
-
-os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
-os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
+import warnings
+warnings.filterwarnings("ignore", category=FutureWarning)
 import json
 import sys
 import time
-from deepface import DeepFace
+from insightface.app import FaceAnalysis
 import cv2
 import numpy as np
 import paths_factory
 
 from i18n import _
 from recorders.video_capture import VideoCapture
-from deepface_utils import resolve_video_certainty, compute_distances, encoding_to_model_index
+from face_utils import resolve_video_certainty, compute_distances, encoding_to_model_index
 
 
 
@@ -37,19 +36,17 @@ if config.get("video", "recording_plugin", fallback="opencv") != "opencv":
 video_capture = VideoCapture(config)
 
 # Read config values to use in the main loop
-deepface_model = config.get("core", "recognition_model", fallback="ArcFace")
-deepface_detector = config.get("core", "detector_backend", fallback="retinaface")
-deepface_distance_metric = config.get("core", "distance_metric", fallback="cosine")
+insightface_model_pack = config.get("core", "model_pack", fallback="buffalo_sc")
+distance_metric = config.get("core", "distance_metric", fallback="cosine")
+det_size = config.getint("core", "det_size", fallback=320)
 
 # Get certainty threshold
 try:
-    video_certainty = resolve_video_certainty(
-        config, deepface_model, deepface_distance_metric
-    )
+    video_certainty = resolve_video_certainty(config, distance_metric)
 except ValueError:
     print(
         _(
-            "Invalid certainty value in config. Use 'auto' or a valid DeepFace distance threshold."
+            "Invalid certainty value in config. Use 'auto' or a valid numeric distance threshold."
         )
     )
     sys.exit(1)
@@ -91,9 +88,20 @@ def print_text(line_number, text):
     )
 
 
-# Pre-warm the DeepFace model
-print(_("Loading DeepFace model..."))
-DeepFace.build_model(deepface_model)
+# Pre-warm the InsightFace model (suppress internal print statements)
+print(_("Loading InsightFace model..."))
+_stdout = sys.stdout
+sys.stdout = open(os.devnull, "w")
+try:
+    face_app = FaceAnalysis(
+        name=insightface_model_pack,
+        allowed_modules=["detection", "recognition"],
+        providers=["CPUExecutionProvider"],
+    )
+    face_app.prepare(ctx_id=-1, det_size=(det_size, det_size))
+finally:
+    sys.stdout.close()
+    sys.stdout = _stdout
 
 encodings = []
 models = None
@@ -245,35 +253,39 @@ try:
 
             rec_tm = time.time()
 
-            # Get face embeddings using DeepFace
+            # Ensure frame is BGR for InsightFace
+            input_frame = orig_frame
+            if len(input_frame.shape) == 2:
+                input_frame = cv2.cvtColor(input_frame, cv2.COLOR_GRAY2BGR)
+            elif input_frame.shape[2] == 1:
+                input_frame = cv2.cvtColor(input_frame, cv2.COLOR_GRAY2BGR)
+
+            # Get face detections and embeddings using InsightFace
             try:
-                results = DeepFace.represent(
-                    img_path=orig_frame,
-                    model_name=deepface_model,
-                    detector_backend=deepface_detector,
-                    enforce_detection=False,
-                    align=True,
-                )
-            except (ValueError, RuntimeError):
-                results = []
+                faces = face_app.get(input_frame)
+            except Exception:
+                faces = []
 
             rec_tm = time.time() - rec_tm
 
             # Loop though all faces and paint a circle around them
-            for result in results:
+            for face in faces:
                 # By default the circle around the face is red for no match
                 color = (0, 0, 230)
 
-                # Get the bounding box from DeepFace
-                fa = result["facial_area"]
+                # Get the bounding box from InsightFace [x1, y1, x2, y2]
+                bbox = face.bbox.astype(int)
+                x1, y1, x2, y2 = bbox
                 # Calculate center and radius from the bounding box
-                x = fa["x"] + fa["w"] // 2
-                y = fa["y"] + fa["h"] // 2
-                r = int(max(fa["w"], fa["h"]) / 2 * 1.2)  # 20% padding
+                x = (x1 + x2) // 2
+                y = (y1 + y2) // 2
+                w = x2 - x1
+                h = y2 - y1
+                r = int(max(w, h) / 2 * 1.2)  # 20% padding
 
                 # If we have models defined for the current user
                 if models and encodings_np is not None:
-                    face_encoding = np.array(result["embedding"], dtype=np.float32)
+                    face_encoding = np.array(face.normed_embedding, dtype=np.float32)
 
                     if face_encoding.ndim != 1 or (
                         expected_embedding_dim is not None
@@ -281,7 +293,7 @@ try:
                     ):
                         print(
                             _(
-                                "Stored face models are incompatible with the current DeepFace model."
+                                "Stored face models are incompatible with the current recognition model."
                             )
                         )
                         print(
@@ -292,7 +304,7 @@ try:
                         sys.exit(10)
 
                     # Compute distances based on configured metric
-                    distances = compute_distances(face_encoding, encodings_np, deepface_distance_metric)
+                    distances = compute_distances(face_encoding, encodings_np, distance_metric)
 
                     # Get best match
                     match_index = np.argmin(distances)

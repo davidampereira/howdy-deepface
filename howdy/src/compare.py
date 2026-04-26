@@ -10,9 +10,8 @@ timings = {"st": time.time()}
 # Import required modules
 import sys
 import os
-
-os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
-os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
+import warnings
+warnings.filterwarnings("ignore", category=FutureWarning)
 import json
 import configparser
 import cv2
@@ -25,7 +24,7 @@ import _thread as thread
 import traceback
 import paths_factory
 from recorders.video_capture import VideoCapture
-from deepface_utils import resolve_video_certainty, compute_distances, encoding_to_model_index
+from face_utils import resolve_video_certainty, compute_distances, encoding_to_model_index
 from i18n import _
 
 
@@ -43,16 +42,27 @@ def exit(code=None):
 
 
 def init_detector(lock):
-    """Pre-warm DeepFace models by loading them into memory"""
-    global DeepFace, deepface_model_name, deepface_detector_name
+    """Pre-warm InsightFace models by loading them into memory"""
+    global face_app
 
     try:
-        from deepface import DeepFace as DeepFaceModule
+        from insightface.app import FaceAnalysis
 
-        DeepFace = DeepFaceModule
-        DeepFace.build_model(deepface_model_name)
+        # Suppress InsightFace's internal print statements during model loading
+        _stdout = sys.stdout
+        sys.stdout = open(os.devnull, "w")
+        try:
+            face_app = FaceAnalysis(
+                name=insightface_model_pack,
+                allowed_modules=["detection", "recognition"],
+                providers=["CPUExecutionProvider"],
+            )
+            face_app.prepare(ctx_id=-1, det_size=(det_size, det_size))
+        finally:
+            sys.stdout.close()
+            sys.stdout = _stdout
     except Exception as e:
-        print(_("Error loading DeepFace model: ") + str(e))
+        print(_("Error loading InsightFace model: ") + str(e))
         lock.release()
         exit(1)
 
@@ -122,10 +132,9 @@ frames = 0
 snapframes = []
 # Tracks the lowest certainty value in the loop
 lowest_certainty = float('inf')
-# DeepFace model and detector names
-deepface_model_name = None
-deepface_detector_name = None
-DeepFace = None
+# InsightFace model pack and settings
+insightface_model_pack = None
+face_app = None
 
 # Try to load the face model from the models folder
 try:
@@ -145,9 +154,9 @@ config = configparser.ConfigParser()
 config.read(paths_factory.config_file_path())
 
 # Get all config values needed
-deepface_model_name = config.get("core", "recognition_model", fallback="ArcFace")
-deepface_detector_name = config.get("core", "detector_backend", fallback="retinaface")
-deepface_distance_metric = config.get("core", "distance_metric", fallback="cosine")
+insightface_model_pack = config.get("core", "model_pack", fallback="buffalo_sc")
+distance_metric = config.get("core", "distance_metric", fallback="cosine")
+det_size = config.getint("core", "det_size", fallback=320)
 timeout = config.getint("video", "timeout", fallback=4)
 dark_threshold = config.getfloat("video", "dark_threshold", fallback=50.0)
 end_report = config.getboolean("debug", "end_report", fallback=False)
@@ -202,13 +211,11 @@ lock.release()
 del lock
 
 try:
-    video_certainty = resolve_video_certainty(
-        config, deepface_model_name, deepface_distance_metric
-    )
+    video_certainty = resolve_video_certainty(config, distance_metric)
 except ValueError:
     print(
         _(
-            "Invalid certainty value in config. Use 'auto' or a valid DeepFace distance threshold."
+            "Invalid certainty value in config. Use 'auto' or a valid numeric distance threshold."
         )
     )
     exit(1)
@@ -362,29 +369,33 @@ while True:
             frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
             gsframe = cv2.rotate(gsframe, cv2.ROTATE_90_CLOCKWISE)
 
-    # Get face embeddings from the frame using DeepFace
+    # Ensure frame is BGR for InsightFace (it expects 3-channel BGR input)
+    if len(frame.shape) == 2:
+        frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+    elif frame.shape[2] == 1:
+        frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+
+    # Get face detections and embeddings from the frame using InsightFace
     try:
-        results = DeepFace.represent(
-            img_path=frame,
-            model_name=deepface_model_name,
-            detector_backend=deepface_detector_name,
-            enforce_detection=True,
-            align=True,
-        )
-    except (ValueError, RuntimeError) as e:
+        faces = face_app.get(frame)
+    except Exception as e:
         # Skip frame on face detection/model errors
         if end_report:
             traceback.print_exc()
         continue
 
+    # Skip if no faces detected
+    if not faces:
+        continue
+
     # Loop through each detected face
-    for result in results:
-        face_encoding = np.array(result["embedding"], dtype=np.float32)
+    for face in faces:
+        face_encoding = np.array(face.normed_embedding, dtype=np.float32)
 
         if face_encoding.ndim != 1 or face_encoding.shape[0] != expected_embedding_dim:
             print(
                 _(
-                    "Stored face models are incompatible with the current DeepFace model."
+                    "Stored face models are incompatible with the current recognition model."
                 )
             )
             print(
@@ -395,7 +406,7 @@ while True:
             exit(10)
 
         # Compute distance between this face and all stored encodings
-        distances = compute_distances(face_encoding, encodings_np, deepface_distance_metric)
+        distances = compute_distances(face_encoding, encodings_np, distance_metric)
 
         # Get best match
         match_index = np.argmin(distances)

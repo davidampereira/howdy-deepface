@@ -3,10 +3,9 @@
 # Import required modules
 import time
 import os
-
-os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
-os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 import sys
+import warnings
+warnings.filterwarnings("ignore", category=FutureWarning)
 import json
 import configparser
 import builtins
@@ -16,15 +15,15 @@ import paths_factory
 from recorders.video_capture import VideoCapture
 from i18n import _
 
-# Try to import deepface and give a nice error if we can't
+# Try to import insightface and give a nice error if we can't
 # Add should be the first point where import issues show up
 try:
-    from deepface import DeepFace
+    from insightface.app import FaceAnalysis
 except ImportError as err:
     print(err)
 
-    print(_("\nCan't import the deepface module, check the output of"))
-    print("pip3 show deepface")
+    print(_("\nCan't import the insightface module, check the output of"))
+    print("pip3 show insightface")
     sys.exit(1)
 
 import cv2
@@ -33,8 +32,22 @@ import cv2
 config = configparser.ConfigParser()
 config.read(paths_factory.config_file_path())
 
-deepface_model = config.get("core", "recognition_model", fallback="ArcFace")
-deepface_detector = config.get("core", "detector_backend", fallback="retinaface")
+insightface_model_pack = config.get("core", "model_pack", fallback="buffalo_sc")
+det_size = config.getint("core", "det_size", fallback=320)
+
+# Initialize InsightFace (suppress internal print statements)
+_stdout = sys.stdout
+sys.stdout = open(os.devnull, "w")
+try:
+    face_app = FaceAnalysis(
+        name=insightface_model_pack,
+        allowed_modules=["detection", "recognition"],
+        providers=["CPUExecutionProvider"],
+    )
+    face_app.prepare(ctx_id=-1, det_size=(det_size, det_size))
+finally:
+    sys.stdout.close()
+    sys.stdout = _stdout
 
 user = builtins.howdy_user
 # The permanent file to store the encoded model in
@@ -107,8 +120,8 @@ print(_("\nPlease look straight into the camera"))
 # Give the user time to read
 time.sleep(2)
 
-# Will contain found face encodings
-enc = []
+# Will contain found face detections
+detected_faces = []
 # Count the number of read frames
 frames = 0
 # Count the number of illuminated read frames
@@ -118,7 +131,6 @@ valid_frames = 0
 dark_tries = 0
 # Track the running darkness total
 dark_running_total = 0
-results = []
 
 dark_threshold = config.getfloat("video", "dark_threshold", fallback=60)
 
@@ -154,27 +166,27 @@ while frames < 60:
         dark_tries += 1
         continue
 
-    # Get all faces from that frame as encodings using DeepFace
+    # Ensure frame is BGR for InsightFace
+    if len(frame.shape) == 2:
+        frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+    elif frame.shape[2] == 1:
+        frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+
+    # Get all faces from that frame using InsightFace
     try:
-        results = DeepFace.represent(
-            img_path=frame,
-            model_name=deepface_model,
-            detector_backend=deepface_detector,
-            enforce_detection=True,
-            align=True,
-        )
-    except (ValueError, RuntimeError) as e:
-        print(_("DeepFace error: ") + str(e), file=sys.stderr)
-        results = []
+        detected_faces = face_app.get(frame)
+    except Exception as e:
+        print(_("InsightFace error: ") + str(e), file=sys.stderr)
+        detected_faces = []
 
     # If we've found at least one, we can continue
-    if results:
+    if detected_faces:
         break
 
 video_capture.release()
 
 # If we've found no faces, try to determine why
-if not results:
+if not detected_faces:
     if valid_frames == 0:
         print(_("Camera saw only black frames - is IR emitter working?"))
     elif valid_frames == dark_tries:
@@ -190,12 +202,12 @@ if not results:
     sys.exit(1)
 
 # If more than 1 faces are detected we can't know which one belongs to the user
-elif len(results) > 1:
+elif len(detected_faces) > 1:
     print(_("Multiple faces detected, aborting"))
     sys.exit(1)
 
-# Get the embedding from DeepFace result
-face_encoding = results[0]["embedding"]
+# Get the normalized embedding from InsightFace result
+face_encoding = detected_faces[0].normed_embedding.tolist()
 
 # Validate embedding before saving
 if not face_encoding or not isinstance(face_encoding, list) or len(face_encoding) == 0:

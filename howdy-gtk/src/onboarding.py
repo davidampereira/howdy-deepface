@@ -76,7 +76,7 @@ class OnboardingWindow(gtk.Window):
         eventbox.modify_bg(gtk.StateType.NORMAL, gdk.Color(red=0, green=0, blue=0))
         self.downloadoutputlabel.set_text(
             _(
-                "DeepFace downloads recognition weights automatically when needed.\nClick Next to continue"
+                "InsightFace downloads recognition weights automatically when needed.\nClick Next to continue"
             )
         )
         self.enable_next()

@@ -1,7 +1,7 @@
 from pathlib import PurePath
 import paths
 
-# DeepFace manages its own model downloads to ~/.deepface/weights/
+# InsightFace manages its own model downloads to ~/.insightface/models/
 # No manual model path management needed
 
 

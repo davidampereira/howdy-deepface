@@ -1,22 +1,34 @@
-# Shared DeepFace utility functions used by compare.py, test.py, and other modules
+# Shared face recognition utility functions used by compare.py, test.py, and other modules
 
 import numpy as np
 
 
-def resolve_video_certainty(config, model_name, distance_metric):
-    """Resolve certainty setting using DeepFace-native thresholds.
+# Default distance thresholds for InsightFace models per metric.
+# These are conservative thresholds suitable for authentication use cases.
+INSIGHTFACE_THRESHOLDS = {
+    "cosine": 0.35,
+    "euclidean": 24.0,
+    "euclidean_l2": 1.13,
+}
+
+
+def resolve_video_certainty(config, distance_metric):
+    """Resolve certainty setting for face matching.
 
     Returns the distance threshold to use for face matching. If config has
-    certainty = "auto", uses DeepFace's built-in threshold for the given
-    model + metric combination. Otherwise parses the numeric value and
-    validates it.
+    certainty = "auto", uses a sensible built-in threshold for the given
+    distance metric. Otherwise parses the numeric value and validates it.
     """
     certainty_raw = config.get("video", "certainty", fallback="auto").strip()
 
     if certainty_raw.lower() == "auto":
-        from deepface.modules.verification import find_threshold
-
-        return find_threshold(model_name, distance_metric)
+        if distance_metric not in INSIGHTFACE_THRESHOLDS:
+            raise ValueError(
+                "Unknown distance metric '{}'. Use one of: {}".format(
+                    distance_metric, ", ".join(INSIGHTFACE_THRESHOLDS.keys())
+                )
+            )
+        return INSIGHTFACE_THRESHOLDS[distance_metric]
 
     certainty_value = float(certainty_raw)
     if certainty_value <= 0:
