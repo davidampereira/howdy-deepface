@@ -14,7 +14,7 @@ There is no dedicated `tests/` directory; verification is mostly build checks pl
 
 ## Build, Test, and Development Commands
 
-- `scripts/install-local.sh`: create/update a project-local `.venv`, install backend dependencies for the current branch, build with Meson, install to `/usr/local`, and verify the installed backend.
+- `scripts/install-local.sh`: create/update a project-local `.venv` with UV, install backend dependencies for the current branch, download required backend model files, build with Meson, install to `/usr/local`, install the PAM module to the path referenced by `/etc/pam.d`, and verify the installed backend.
 - `meson setup build -Dpython_path=/path/to/python`: configure a local build. Use the interpreter with the required backend stack.
 - `meson compile -C build`: compile the C++ PAM module and generate configured files.
 - `meson install -C build`: install to the configured prefix. This can affect authentication paths, so review options first.

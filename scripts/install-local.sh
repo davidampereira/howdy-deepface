@@ -5,10 +5,13 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
 PYTHON_BIN="${PYTHON_BIN:-python3}"
+UV_BIN="${UV_BIN:-uv}"
 VENV_DIR="${VENV_DIR:-$REPO_ROOT/.venv}"
 PREFIX="${PREFIX:-/usr/local}"
 SUDO="${SUDO:-sudo}"
 BUILD_DIR="${BUILD_DIR:-build}"
+PAM_CONF_DIR="${PAM_CONF_DIR:-/etc/pam.d}"
+PAM_DIR="${PAM_DIR:-}"
 
 info() {
 	printf '==> %s\n' "$*"
@@ -17,6 +20,10 @@ info() {
 fail() {
 	printf 'error: %s\n' "$*" >&2
 	exit 1
+}
+
+require_command() {
+	command -v "$1" >/dev/null 2>&1 || fail "missing required command: $1"
 }
 
 backend_name() {
@@ -29,10 +36,42 @@ backend_name() {
 	fi
 }
 
+detect_pam_dir() {
+	local module_path
+
+	if [ -n "$PAM_DIR" ]; then
+		printf '%s\n' "$PAM_DIR"
+		return
+	fi
+
+	if [ -d "$PAM_CONF_DIR" ]; then
+		module_path="$(
+			awk '
+				$0 !~ /^[[:space:]]*#/ {
+					for (i = 1; i <= NF; i++) {
+						if ($i ~ /^\/.*\/pam_howdy\.so$/) {
+							print $i
+							exit
+						}
+					}
+				}
+			' "$PAM_CONF_DIR"/* 2>/dev/null || true
+		)"
+
+		if [ -n "$module_path" ]; then
+			dirname "$module_path"
+			return
+		fi
+	fi
+
+	printf '%s\n' "$PREFIX/lib/$(gcc -dumpmachine)/security"
+}
+
 create_venv() {
 	info "Creating Python environment at $VENV_DIR"
-	"$PYTHON_BIN" -m venv --system-site-packages "$VENV_DIR"
-	"$VENV_DIR/bin/python" -m pip install --upgrade pip setuptools wheel
+	require_command "$UV_BIN"
+	"$UV_BIN" venv --allow-existing --system-site-packages --python "$PYTHON_BIN" "$VENV_DIR"
+	"$UV_BIN" pip install --python "$VENV_DIR/bin/python" --upgrade pip setuptools wheel
 }
 
 check_opencv_python() {
@@ -55,7 +94,35 @@ PY
 
 install_buffalo_python() {
 	info "Installing InsightFace backend Python dependencies"
-	"$VENV_DIR/bin/python" -m pip install insightface onnxruntime
+	"$UV_BIN" pip install --python "$VENV_DIR/bin/python" insightface onnxruntime
+}
+
+prepare_buffalo_models() {
+	local pack
+	local root
+	local model_dir
+
+	pack="$(awk -F= '/^[[:space:]]*insightface_model_pack[[:space:]]*=/{gsub(/[[:space:]]/, "", $2); print $2}' howdy/src/config.ini)"
+	root="$(awk -F= '/^[[:space:]]*insightface_model_root[[:space:]]*=/{sub(/^[[:space:]]*/, "", $2); sub(/[[:space:]]*$/, "", $2); print $2}' howdy/src/config.ini)"
+	pack="${pack:-buffalo_s}"
+	root="${root:-~/.insightface}"
+	model_dir="${root/#\~/$HOME}/models/$pack"
+
+	if [ -d "$model_dir" ] && find "$model_dir" -maxdepth 1 -name '*.onnx' | grep -q .; then
+		info "Using existing InsightFace model pack at $model_dir"
+		return
+	fi
+
+	info "Downloading InsightFace model pack $pack to $model_dir"
+	INSIGHTFACE_MODEL_PACK="$pack" INSIGHTFACE_MODEL_ROOT="$root" "$VENV_DIR/bin/python" - <<'PY'
+import os
+
+from insightface.utils.storage import download
+
+pack = os.environ["INSIGHTFACE_MODEL_PACK"]
+root = os.environ["INSIGHTFACE_MODEL_ROOT"]
+download("models", pack, force=True, root=root)
+PY
 }
 
 download() {
@@ -107,13 +174,17 @@ check_buffalo_models() {
 
 configure_build() {
 	local python_path="$VENV_DIR/bin/python"
+	local pam_dir
+
+	pam_dir="$(detect_pam_dir)"
+	info "Installing PAM module to $pam_dir"
 
 	if [ -d "$BUILD_DIR" ]; then
 		info "Reconfiguring Meson build"
-		meson setup --wipe "$BUILD_DIR" -Dpython_path="$python_path" -Dprefix="$PREFIX"
+		meson setup --wipe "$BUILD_DIR" -Dpython_path="$python_path" -Dprefix="$PREFIX" -Dpam_dir="$pam_dir"
 	else
 		info "Configuring Meson build"
-		meson setup "$BUILD_DIR" -Dpython_path="$python_path" -Dprefix="$PREFIX"
+		meson setup "$BUILD_DIR" -Dpython_path="$python_path" -Dprefix="$PREFIX" -Dpam_dir="$pam_dir"
 	fi
 }
 
@@ -161,6 +232,7 @@ main() {
 			;;
 		buffalo)
 			install_buffalo_python
+			prepare_buffalo_models
 			check_buffalo_models
 			;;
 	esac

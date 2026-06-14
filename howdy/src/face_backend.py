@@ -1,3 +1,8 @@
+from contextlib import contextmanager
+import os
+import sys
+import warnings
+
 import numpy as np
 
 
@@ -9,6 +14,32 @@ class FaceBackendError(RuntimeError):
     pass
 
 
+@contextmanager
+def suppress_backend_noise():
+    """Silence noisy native model initialization output."""
+    sys.stdout.flush()
+    sys.stderr.flush()
+
+    stdout_fd = os.dup(1)
+    stderr_fd = os.dup(2)
+    devnull_fd = os.open(os.devnull, os.O_WRONLY)
+
+    try:
+        os.dup2(devnull_fd, 1)
+        os.dup2(devnull_fd, 2)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", FutureWarning)
+            yield
+    finally:
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os.dup2(stdout_fd, 1)
+        os.dup2(stderr_fd, 2)
+        os.close(stdout_fd)
+        os.close(stderr_fd)
+        os.close(devnull_fd)
+
+
 class FaceBackend:
     """InsightFace SCRFD + Buffalo recognition backend."""
 
@@ -16,7 +47,8 @@ class FaceBackend:
 
     def __init__(self, config):
         try:
-            from insightface.app import FaceAnalysis
+            with suppress_backend_noise():
+                from insightface.app import FaceAnalysis
         except ImportError as err:
             raise FaceBackendError(
                 "Cannot import insightface; install insightface and onnxruntime"
@@ -33,17 +65,18 @@ class FaceBackend:
         detector_threshold = config.getfloat("core", "detector_score_threshold", fallback=0.5)
 
         try:
-            self.app = FaceAnalysis(
-                name=model_pack,
-                root=model_root,
-                allowed_modules=["detection", "recognition"],
-                providers=["CPUExecutionProvider"],
-            )
-            self.app.prepare(
-                ctx_id=-1,
-                det_thresh=detector_threshold,
-                det_size=(detector_size, detector_size),
-            )
+            with suppress_backend_noise():
+                self.app = FaceAnalysis(
+                    name=model_pack,
+                    root=model_root,
+                    allowed_modules=["detection", "recognition"],
+                    providers=["CPUExecutionProvider"],
+                )
+                self.app.prepare(
+                    ctx_id=-1,
+                    det_thresh=detector_threshold,
+                    det_size=(detector_size, detector_size),
+                )
         except Exception as err:
             raise FaceBackendError(str(err)) from err
 
@@ -51,7 +84,8 @@ class FaceBackend:
         pass
 
     def represent(self, frame, enforce_detection=True):
-        faces = self.app.get(frame)
+        with suppress_backend_noise():
+            faces = self.app.get(frame)
         if not faces:
             if enforce_detection:
                 raise FaceBackendError("No face detected")
