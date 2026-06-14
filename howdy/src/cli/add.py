@@ -13,28 +13,15 @@ import builtins
 import numpy as np
 import paths_factory
 
+from face_backend import FaceBackend, FaceBackendError
 from recorders.video_capture import VideoCapture
 from i18n import _
-
-# Try to import deepface and give a nice error if we can't
-# Add should be the first point where import issues show up
-try:
-    from deepface import DeepFace
-except ImportError as err:
-    print(err)
-
-    print(_("\nCan't import the deepface module, check the output of"))
-    print("pip3 show deepface")
-    sys.exit(1)
 
 import cv2
 
 # Read config from disk
 config = configparser.ConfigParser()
 config.read(paths_factory.config_file_path())
-
-deepface_model = config.get("core", "recognition_model", fallback="ArcFace")
-deepface_detector = config.get("core", "detector_backend", fallback="retinaface")
 
 user = builtins.howdy_user
 # The permanent file to store the encoded model in
@@ -102,6 +89,12 @@ insert_model = {"time": int(time.time()), "label": label, "id": next_id, "data":
 # Set up video_capture
 video_capture = VideoCapture(config)
 
+try:
+    face_backend = FaceBackend(config)
+except FaceBackendError as err:
+    print(_("Face backend error: ") + str(err), file=sys.stderr)
+    sys.exit(1)
+
 print(_("\nPlease look straight into the camera"))
 
 # Give the user time to read
@@ -154,17 +147,11 @@ while frames < 60:
         dark_tries += 1
         continue
 
-    # Get all faces from that frame as encodings using DeepFace
+    # Get all faces from that frame as encodings using the configured backend
     try:
-        results = DeepFace.represent(
-            img_path=frame,
-            model_name=deepface_model,
-            detector_backend=deepface_detector,
-            enforce_detection=True,
-            align=True,
-        )
-    except (ValueError, RuntimeError) as e:
-        print(_("DeepFace error: ") + str(e), file=sys.stderr)
+        results = face_backend.represent(frame, enforce_detection=True)
+    except (FaceBackendError, ValueError, RuntimeError) as e:
+        print(_("Face backend error: ") + str(e), file=sys.stderr)
         results = []
 
     # If we've found at least one, we can continue
@@ -194,7 +181,7 @@ elif len(results) > 1:
     print(_("Multiple faces detected, aborting"))
     sys.exit(1)
 
-# Get the embedding from DeepFace result
+# Get the embedding from the backend result
 face_encoding = results[0]["embedding"]
 
 # Validate embedding before saving

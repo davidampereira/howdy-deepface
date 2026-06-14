@@ -29,7 +29,7 @@ py_sources = [
     'cli/test.py',
     'cli.py',
     'compare.py',
-    'deepface_utils.py',
+    'face_backend.py',
     'i18n.py',
     'paths_factory.py',
     'recorders/__init__.py',
@@ -107,7 +107,7 @@ if not fs.exists(config_path)
     install_data('config.ini', install_dir: confdir, install_mode: 'rwxr--r--', install_tag: 'config')
 endif
 
-# DeepFace handles model downloads automatically — no dlib-data needed
+# OpenCV backend model files are configured by path in config.ini.
 
 install_man('../howdy.1')
 

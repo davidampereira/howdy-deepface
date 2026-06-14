@@ -1,8 +1,7 @@
 from pathlib import PurePath
 import paths
 
-# DeepFace manages its own model downloads to ~/.deepface/weights/
-# No manual model path management needed
+# Face backend model files live under the Howdy data directory by default.
 
 
 def user_model_path(user: str) -> str:

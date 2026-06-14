@@ -93,6 +93,7 @@ If you want to build Howdy from source, a few dependencies are required.
 - ninja
 - INIReader (can be pulled from git automatically if not found)
 - libevdev
+- OpenCV with `FaceDetectorYN` and `FaceRecognizerSF` support
 
 To install them on Debian/Ubuntu for example:
 
@@ -104,6 +105,23 @@ libpam0g-dev libinih-dev libevdev-dev python3-opencv \
 python3-dev libopencv-dev
 ```
 
+Download the OpenCV Zoo YuNet and SFace ONNX models and place them where
+Howdy's config expects them. With the default `/usr/local` prefix:
+
+```sh
+sudo install -d /usr/local/share/howdy/models/opencv
+sudo curl -L \
+  https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx \
+  -o /usr/local/share/howdy/models/opencv/face_detection_yunet_2023mar.onnx
+sudo curl -L \
+  https://github.com/opencv/opencv_zoo/raw/main/models/face_recognition_sface/face_recognition_sface_2021dec.onnx \
+  -o /usr/local/share/howdy/models/opencv/face_recognition_sface_2021dec.onnx
+```
+
+If you install Howdy with another prefix, either put the files under that
+prefix's `share/howdy/models/opencv/` directory or set `detector_model_path`
+and `recognizer_model_path` in `config.ini`.
+
 #### Build
 
 ```sh
@@ -111,13 +129,14 @@ meson setup build -Dpython_path=/usr/bin/python3.12
 meson compile -C build
 ```
 
-If your DeepFace/TensorFlow stack lives in a virtual environment, point Howdy to that interpreter instead (for example `-Dpython_path=/path/to/tf-env/bin/python3.12`).
+Point `-Dpython_path` to the interpreter that has the required Python modules,
+including `cv2` and `numpy`.
 
 You can also install Howdy to your system with `meson install -C build`.
 
 ## Setup
 
-After installation, Howdy needs to learn what you look like so it can recognise you later. Run `sudo howdy add` to add a face model.
+After installation, Howdy needs to learn what you look like so it can recognise you later. Run `sudo howdy add` to add a face model. Models created with other recognition backends are not compatible, so run `sudo howdy clear` before enrolling if you are switching from a DeepFace or dlib build.
 
 If nothing went wrong we should be able to run sudo by just showing your face. Open a new terminal and run `sudo -i` to see it in action. Please check [this wiki page](https://github.com/boltgolt/howdy/wiki/Common-issues) if you're experiencing problems or [search](https://github.com/boltgolt/howdy/issues) for similar issues.
 
