@@ -10,14 +10,19 @@ os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 import json
 import sys
 import time
-from deepface import DeepFace
 import cv2
 import numpy as np
 import paths_factory
 
 from i18n import _
 from recorders.video_capture import VideoCapture
-from deepface_utils import resolve_video_certainty, compute_distances, encoding_to_model_index
+from face_backend import (
+    FaceBackend,
+    FaceBackendError,
+    resolve_video_certainty,
+    compute_distances,
+    encoding_to_model_index,
+)
 
 
 
@@ -37,19 +42,17 @@ if config.get("video", "recording_plugin", fallback="opencv") != "opencv":
 video_capture = VideoCapture(config)
 
 # Read config values to use in the main loop
-deepface_model = config.get("core", "recognition_model", fallback="ArcFace")
-deepface_detector = config.get("core", "detector_backend", fallback="retinaface")
-deepface_distance_metric = config.get("core", "distance_metric", fallback="cosine")
+distance_metric = config.get("core", "distance_metric", fallback="cosine")
 
 # Get certainty threshold
 try:
     video_certainty = resolve_video_certainty(
-        config, deepface_model, deepface_distance_metric
+        config, distance_metric
     )
 except ValueError:
     print(
         _(
-            "Invalid certainty value in config. Use 'auto' or a valid DeepFace distance threshold."
+            "Invalid certainty value in config. Use 'auto' or a valid backend distance threshold."
         )
     )
     sys.exit(1)
@@ -91,9 +94,13 @@ def print_text(line_number, text):
     )
 
 
-# Pre-warm the DeepFace model
-print(_("Loading DeepFace model..."))
-DeepFace.build_model(deepface_model)
+print(_("Loading face recognition model..."))
+try:
+    face_backend = FaceBackend(config)
+    face_backend.warmup()
+except FaceBackendError as err:
+    print(_("Face backend error: ") + str(err), file=sys.stderr)
+    sys.exit(1)
 
 encodings = []
 models = None
@@ -245,16 +252,10 @@ try:
 
             rec_tm = time.time()
 
-            # Get face embeddings using DeepFace
+            # Get face embeddings using the configured backend
             try:
-                results = DeepFace.represent(
-                    img_path=orig_frame,
-                    model_name=deepface_model,
-                    detector_backend=deepface_detector,
-                    enforce_detection=False,
-                    align=True,
-                )
-            except (ValueError, RuntimeError):
+                results = face_backend.represent(orig_frame, enforce_detection=False)
+            except (FaceBackendError, ValueError, RuntimeError):
                 results = []
 
             rec_tm = time.time() - rec_tm
@@ -264,7 +265,7 @@ try:
                 # By default the circle around the face is red for no match
                 color = (0, 0, 230)
 
-                # Get the bounding box from DeepFace
+                # Get the bounding box from the backend result
                 fa = result["facial_area"]
                 # Calculate center and radius from the bounding box
                 x = fa["x"] + fa["w"] // 2
@@ -281,7 +282,7 @@ try:
                     ):
                         print(
                             _(
-                                "Stored face models are incompatible with the current DeepFace model."
+                                "Stored face models are incompatible with the current recognition model."
                             )
                         )
                         print(
@@ -292,7 +293,7 @@ try:
                         sys.exit(10)
 
                     # Compute distances based on configured metric
-                    distances = compute_distances(face_encoding, encodings_np, deepface_distance_metric)
+                    distances = compute_distances(face_encoding, encodings_np, distance_metric)
 
                     # Get best match
                     match_index = np.argmin(distances)

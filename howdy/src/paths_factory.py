@@ -1,8 +1,7 @@
 from pathlib import PurePath
 import paths
 
-# DeepFace manages its own model downloads to ~/.deepface/weights/
-# No manual model path management needed
+# InsightFace model packs are configured in config.ini.
 
 
 def user_model_path(user: str) -> str:

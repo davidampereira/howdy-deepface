@@ -93,6 +93,8 @@ If you want to build Howdy from source, a few dependencies are required.
 - ninja
 - INIReader (can be pulled from git automatically if not found)
 - libevdev
+- InsightFace
+- ONNX Runtime
 
 To install them on Debian/Ubuntu for example:
 
@@ -104,6 +106,34 @@ libpam0g-dev libinih-dev libevdev-dev python3-opencv \
 python3-dev libopencv-dev
 ```
 
+Install the Python recognition stack into the interpreter Howdy will use:
+
+```sh
+python3 -m pip install insightface onnxruntime
+```
+
+This branch supports the compact InsightFace `buffalo_s` and `buffalo_sc`
+model packs. InsightFace does not mark these packs for automatic download, so
+download the pack you want from the InsightFace model zoo and extract it under
+the configured model root. With the default config, the directory should look
+like one of these:
+
+```text
+~/.insightface/models/buffalo_s/*.onnx
+~/.insightface/models/buffalo_sc/*.onnx
+```
+
+Because PAM authentication normally runs as root, install the model pack for
+the same user/environment that runs Howdy, or set `insightface_model_root` in
+`config.ini` to an absolute shared path. Select the pack with:
+
+```ini
+insightface_model_pack = buffalo_s
+```
+
+Use `buffalo_s` for better recognition quality, or `buffalo_sc` for the
+smallest and fastest pack.
+
 #### Build
 
 ```sh
@@ -111,13 +141,14 @@ meson setup build -Dpython_path=/usr/bin/python3.12
 meson compile -C build
 ```
 
-If your DeepFace/TensorFlow stack lives in a virtual environment, point Howdy to that interpreter instead (for example `-Dpython_path=/path/to/tf-env/bin/python3.12`).
+Point `-Dpython_path` to the interpreter that has the required Python modules,
+including `cv2`, `numpy`, `insightface`, and `onnxruntime`.
 
 You can also install Howdy to your system with `meson install -C build`.
 
 ## Setup
 
-After installation, Howdy needs to learn what you look like so it can recognise you later. Run `sudo howdy add` to add a face model.
+After installation, Howdy needs to learn what you look like so it can recognise you later. Run `sudo howdy add` to add a face model. Models created with other recognition backends are not compatible, so run `sudo howdy clear` before enrolling if you are switching from a DeepFace or dlib build.
 
 If nothing went wrong we should be able to run sudo by just showing your face. Open a new terminal and run `sudo -i` to see it in action. Please check [this wiki page](https://github.com/boltgolt/howdy/wiki/Common-issues) if you're experiencing problems or [search](https://github.com/boltgolt/howdy/issues) for similar issues.
 

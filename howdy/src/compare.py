@@ -25,7 +25,13 @@ import _thread as thread
 import traceback
 import paths_factory
 from recorders.video_capture import VideoCapture
-from deepface_utils import resolve_video_certainty, compute_distances, encoding_to_model_index
+from face_backend import (
+    FaceBackend,
+    FaceBackendError,
+    resolve_video_certainty,
+    compute_distances,
+    encoding_to_model_index,
+)
 from i18n import _
 
 
@@ -43,16 +49,14 @@ def exit(code=None):
 
 
 def init_detector(lock):
-    """Pre-warm DeepFace models by loading them into memory"""
-    global DeepFace, deepface_model_name, deepface_detector_name
+    """Pre-warm face models by loading them into memory"""
+    global face_backend
 
     try:
-        from deepface import DeepFace as DeepFaceModule
-
-        DeepFace = DeepFaceModule
-        DeepFace.build_model(deepface_model_name)
+        face_backend = FaceBackend(config)
+        face_backend.warmup()
     except Exception as e:
-        print(_("Error loading DeepFace model: ") + str(e))
+        print(_("Error loading face recognition model: ") + str(e))
         lock.release()
         exit(1)
 
@@ -122,10 +126,8 @@ frames = 0
 snapframes = []
 # Tracks the lowest certainty value in the loop
 lowest_certainty = float('inf')
-# DeepFace model and detector names
-deepface_model_name = None
-deepface_detector_name = None
-DeepFace = None
+# Face recognition backend
+face_backend = None
 
 # Try to load the face model from the models folder
 try:
@@ -145,9 +147,7 @@ config = configparser.ConfigParser()
 config.read(paths_factory.config_file_path())
 
 # Get all config values needed
-deepface_model_name = config.get("core", "recognition_model", fallback="ArcFace")
-deepface_detector_name = config.get("core", "detector_backend", fallback="retinaface")
-deepface_distance_metric = config.get("core", "distance_metric", fallback="cosine")
+distance_metric = config.get("core", "distance_metric", fallback="cosine")
 timeout = config.getint("video", "timeout", fallback=4)
 dark_threshold = config.getfloat("video", "dark_threshold", fallback=50.0)
 end_report = config.getboolean("debug", "end_report", fallback=False)
@@ -203,12 +203,12 @@ del lock
 
 try:
     video_certainty = resolve_video_certainty(
-        config, deepface_model_name, deepface_distance_metric
+        config, distance_metric
     )
 except ValueError:
     print(
         _(
-            "Invalid certainty value in config. Use 'auto' or a valid DeepFace distance threshold."
+            "Invalid certainty value in config. Use 'auto' or a valid backend distance threshold."
         )
     )
     exit(1)
@@ -362,16 +362,10 @@ while True:
             frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
             gsframe = cv2.rotate(gsframe, cv2.ROTATE_90_CLOCKWISE)
 
-    # Get face embeddings from the frame using DeepFace
+    # Get face embeddings from the frame using the configured backend
     try:
-        results = DeepFace.represent(
-            img_path=frame,
-            model_name=deepface_model_name,
-            detector_backend=deepface_detector_name,
-            enforce_detection=True,
-            align=True,
-        )
-    except (ValueError, RuntimeError) as e:
+        results = face_backend.represent(frame, enforce_detection=True)
+    except (FaceBackendError, ValueError, RuntimeError) as e:
         # Skip frame on face detection/model errors
         if end_report:
             traceback.print_exc()
@@ -384,7 +378,7 @@ while True:
         if face_encoding.ndim != 1 or face_encoding.shape[0] != expected_embedding_dim:
             print(
                 _(
-                    "Stored face models are incompatible with the current DeepFace model."
+                    "Stored face models are incompatible with the current recognition model."
                 )
             )
             print(
@@ -395,7 +389,7 @@ while True:
             exit(10)
 
         # Compute distance between this face and all stored encodings
-        distances = compute_distances(face_encoding, encodings_np, deepface_distance_metric)
+        distances = compute_distances(face_encoding, encodings_np, distance_metric)
 
         # Get best match
         match_index = np.argmin(distances)
